@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "habitat",
+      "dependencies": {
+        "commander": "file:vendor/commander",
+      },
+    },
+  },
+  "packages": {
+    "commander": ["commander@file:vendor/commander", {}],
+  }
+}

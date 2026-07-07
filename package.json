@@ -1,0 +1,11 @@
+{
+  "name": "habitat",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "habitat": "./src/index.ts"
+  },
+  "dependencies": {
+    "commander": "file:vendor/commander"
+  }
+}
