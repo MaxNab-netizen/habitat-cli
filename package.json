@@ -5,7 +5,13 @@
   "bin": {
     "habitat": "./src/index.ts"
   },
+  "scripts": {
+    "typecheck": "./node_modules/.bin/tsc --noEmit"
+  },
   "dependencies": {
     "commander": "file:vendor/commander"
+  },
+  "devDependencies": {
+    "typescript": "file:vendor/typescript"
   }
 }

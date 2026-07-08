@@ -7,9 +7,14 @@
       "dependencies": {
         "commander": "file:vendor/commander",
       },
+      "devDependencies": {
+        "typescript": "file:vendor/typescript",
+      },
     },
   },
   "packages": {
     "commander": ["commander@file:vendor/commander", {}],
+
+    "typescript": ["typescript@file:vendor/typescript", { "bin": { "tsc": "./bin/tsc", "tsserver": "./bin/tsserver" } }],
   }
 }
