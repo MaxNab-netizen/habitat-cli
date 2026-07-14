@@ -11,6 +11,8 @@ export interface HabitatModule {
   capabilities: string[];
 }
 
+export type HabitatModuleState = "offline" | "idle" | "online" | "active" | "damaged";
+
 const habitatDirectory = join(process.cwd(), ".habitat");
 const modulesPath = join(habitatDirectory, "modules.json");
 
@@ -51,6 +53,36 @@ export async function updateModule(id: string, changes: Partial<Omit<HabitatModu
   return updated;
 }
 
+export async function setModuleStatus(id: string, status: HabitatModuleState): Promise<{ module: HabitatModule; powerDrawKw: number }> {
+  const modules = await readModules();
+  const index = modules.findIndex((module) => module.id === id);
+  if (index < 0) {
+    throw new Error(`Module not found: ${id}`);
+  }
+
+  const module = modules[index];
+  const powerDrawKw = module.runtimeAttributes.powerDrawKw;
+  if (!isRecord(powerDrawKw)) {
+    throw new Error(`Module ${module.id} is missing a powerDrawKw map.`);
+  }
+
+  const draw = powerDrawKw[status];
+  if (typeof draw !== "number" || !Number.isFinite(draw) || draw < 0) {
+    throw new Error(`Module ${module.id} has no valid power draw for state "${status}".`);
+  }
+
+  const updated: HabitatModule = {
+    ...module,
+    runtimeAttributes: {
+      ...module.runtimeAttributes,
+      status,
+    },
+  };
+  modules[index] = updated;
+  await writeModules(modules);
+  return { module: updated, powerDrawKw: draw };
+}
+
 export async function deleteModule(id: string): Promise<void> {
   const modules = await readModules();
   const remaining = modules.filter((module) => module.id !== id);
@@ -63,4 +95,8 @@ export async function deleteModule(id: string): Promise<void> {
 
 function isMissingFile(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

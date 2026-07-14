@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import { loadKeplerConfig } from "./config.js";
 import { KeplerApiError, KeplerClient } from "./kepler-client.js";
-import { HabitatModule, createModule, deleteModule, readModules, updateModule, writeModules } from "./modules.js";
+import { HabitatModule, HabitatModuleState, createModule, deleteModule, readModules, setModuleStatus, updateModule, writeModules } from "./modules.js";
+import { applyLocalTicks } from "./simulation.js";
 import {
   deleteRegistrationState,
   readRegistrationState,
@@ -40,17 +41,48 @@ export function createProgram(): Command {
       await unregisterHabitat();
     });
 
+  program
+    .command("tick <count>")
+    .description("Advance the local power simulation by a number of seconds.")
+    .action(async (count: string) => {
+      const result = await applyLocalTicks(parseTickCount(count));
+      console.log(`Applied ${result.appliedTicks} local tick${result.appliedTicks === 1 ? "" : "s"}.`);
+      console.log(`Current tick: ${result.currentTick}`);
+      console.log(`Energy drained: ${formatEnergy(result.energyDrainedKwh)} kWh`);
+      console.log(`Battery remaining: ${formatEnergy(result.batteryRemainingKwh)} kWh`);
+      if (result.unmetEnergyKwh > 0) {
+        console.log(`Unmet energy: ${formatEnergy(result.unmetEnergyKwh)} kWh`);
+      }
+    });
+
   const modules = program.command("module").description("Manage local Habitat modules.");
   modules.command("list").description("List local Habitat modules.").action(async () => {
-    for (const module of await readModules()) {
-      console.log(`${module.displayName}  ${module.blueprintId}`);
+    const allModules = await readModules();
+    for (const [index, module] of allModules.entries()) {
+      console.log(`${getReadableModuleId(module, index, allModules)}  ${module.displayName}  ${module.blueprintId}`);
     }
   });
   modules.command("show <id>").description("Show one local module.").action(async (id: string) => {
-    const module = (await readModules()).find((item) => item.id === id);
+    const allModules = await readModules();
+    const module = findModuleByReference(allModules, id);
     if (!module) throw new Error(`Module not found: ${id}`);
-    console.log(JSON.stringify(module, null, 2));
+    console.log(JSON.stringify({ shortId: getReadableModuleId(module, allModules.indexOf(module), allModules), ...module }, null, 2));
   });
+  modules.command("status").description("Show module states and current power draw.").action(async () => {
+    await showModulePowerStatus();
+  });
+  modules
+    .command("set-status <module-id> <status>")
+    .description("Set one local module's runtime state.")
+    .action(async (moduleId: string, status: string) => {
+      const modulesBeforeUpdate = await readModules();
+      const module = findModuleByReference(modulesBeforeUpdate, moduleId);
+      if (!module) throw new Error(`Module not found: ${moduleId}`);
+
+      const nextStatus = parseModuleState(status);
+      const result = await setModuleStatus(module.id, nextStatus);
+      console.log(`Set ${moduleId} to ${nextStatus}. Current power draw: ${result.powerDrawKw.toFixed(3)} kW.`);
+    });
   modules
     .command("create")
     .description("Create a local Habitat module.")
@@ -76,15 +108,20 @@ export function createProgram(): Command {
     .option("--runtime-attributes <json>", "Runtime attributes as JSON")
     .option("--capability <capability...>", "Module capabilities")
     .action(async (id: string, options: { name?: string; blueprintId?: string; runtimeAttributes?: string; capability?: string[] }) => {
+      const allModules = await readModules();
+      const module = findModuleByReference(allModules, id);
+      if (!module) throw new Error(`Module not found: ${id}`);
       const changes: Partial<Omit<HabitatModule, "id">> = {};
       if (options.name !== undefined) changes.displayName = options.name;
       if (options.blueprintId !== undefined) changes.blueprintId = options.blueprintId;
       if (options.runtimeAttributes !== undefined) changes.runtimeAttributes = parseJsonObject(options.runtimeAttributes, "runtime attributes");
       if (options.capability !== undefined) changes.capabilities = options.capability;
-      console.log(JSON.stringify(await updateModule(id, changes), null, 2));
+      console.log(JSON.stringify(await updateModule(module.id, changes), null, 2));
     });
   modules.command("delete <id>").description("Delete a local Habitat module.").action(async (id: string) => {
-    await deleteModule(id);
+    const module = findModuleByReference(await readModules(), id);
+    if (!module) throw new Error(`Module not found: ${id}`);
+    await deleteModule(module.id);
     console.log(`Deleted module ${id}.`);
   });
 
@@ -95,11 +132,46 @@ export function createProgram(): Command {
 Examples:
   habitat register --name "Artemis Ridge"
   habitat status
+  habitat tick 10
   habitat unregister
 `,
   );
 
   return program;
+}
+
+function parseTickCount(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new Error("Tick count must be a positive integer.");
+  }
+
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new Error("Tick count must be a positive integer.");
+  }
+
+  return count;
+}
+
+function formatEnergy(value: number): string {
+  return value.toFixed(6);
+}
+
+function findModuleByReference(modules: HabitatModule[], reference: string): HabitatModule | undefined {
+  return modules.find((module, index) => module.id === reference || getReadableModuleId(module, index, modules) === reference);
+}
+
+function getReadableModuleId(module: HabitatModule, index: number, modules: HabitatModule[]): string {
+  const normalizedBlueprintId = module.blueprintId.replace(/-/g, "_");
+  const serverIdMatch = module.id.match(new RegExp(`_${normalizedBlueprintId}_(\\d+)$`));
+  if (serverIdMatch) {
+    return `${module.blueprintId}-${serverIdMatch[1]}`;
+  }
+
+  const sameBlueprintIndex = modules
+    .slice(0, index + 1)
+    .filter((candidate) => candidate.blueprintId === module.blueprintId).length;
+  return `${module.blueprintId}-${sameBlueprintIndex}`;
 }
 
 async function registerHabitat(displayName: string): Promise<void> {
@@ -157,6 +229,70 @@ async function showStatus(): Promise<void> {
 
     throw error;
   }
+}
+
+async function showModulePowerStatus(): Promise<void> {
+  const modules = await readModules();
+  const rows = modules.map((module, index) => {
+    const state = readModuleState(module);
+    const powerDrawKw = readPowerDraw(module);
+    return {
+      name: module.displayName,
+      id: getReadableModuleId(module, index, modules),
+      state,
+      powerDrawKw,
+    };
+  });
+
+  const nameWidth = Math.max("Module".length, ...rows.map((row) => row.name.length));
+  const idWidth = Math.max("ID".length, ...rows.map((row) => row.id.length));
+  const stateWidth = Math.max("State".length, ...rows.map((row) => row.state.length));
+  const powerHeader = "Power (kW)";
+  const separator = `${"-".repeat(nameWidth)}  ${"-".repeat(idWidth)}  ${"-".repeat(stateWidth)}  ${"-".repeat(powerHeader.length)}`;
+
+  console.log(`${"Module".padEnd(nameWidth)}  ${"ID".padEnd(idWidth)}  ${"State".padEnd(stateWidth)}  ${powerHeader}`);
+  console.log(separator);
+  for (const row of rows) {
+    console.log(`${row.name.padEnd(nameWidth)}  ${row.id.padEnd(idWidth)}  ${row.state.padEnd(stateWidth)}  ${row.powerDrawKw.toFixed(3).padStart(powerHeader.length)}`);
+  }
+
+  const totalPowerDrawKw = rows.reduce((total, row) => total + row.powerDrawKw, 0);
+  console.log(`\nTotal current power draw: ${totalPowerDrawKw.toFixed(3)} kW`);
+  console.log(`Energy cost for one tick: ${(totalPowerDrawKw / 3600).toFixed(6)} kWh`);
+}
+
+function readPowerDraw(module: HabitatModule): number {
+  const state = readModuleState(module);
+  const powerDrawKw = module.runtimeAttributes.powerDrawKw;
+  if (!isRecord(powerDrawKw)) {
+    throw new Error(`Module ${module.id} is missing a powerDrawKw map.`);
+  }
+
+  const draw = powerDrawKw[state];
+  if (typeof draw !== "number" || !Number.isFinite(draw) || draw < 0) {
+    throw new Error(`Module ${module.id} has no valid power draw for state "${state}".`);
+  }
+
+  return draw;
+}
+
+function readModuleState(module: HabitatModule): HabitatModuleState {
+  const state = module.runtimeAttributes.status;
+  if (!isAllowedModuleState(state)) {
+    throw new Error(`Module ${module.id} has invalid state; expected online, offline, idle, active, or damaged.`);
+  }
+  return state;
+}
+
+function isAllowedModuleState(value: unknown): value is HabitatModuleState {
+  return value === "online" || value === "offline" || value === "idle" || value === "active" || value === "damaged";
+}
+
+function parseModuleState(value: string): HabitatModuleState {
+  if (!isAllowedModuleState(value)) {
+    throw new Error("Status must be one of: offline, idle, online, active, damaged.");
+  }
+  return value;
 }
 
 function extractStarterModules(value: unknown): HabitatModule[] {
