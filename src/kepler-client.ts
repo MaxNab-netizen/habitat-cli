@@ -36,6 +36,30 @@ export class KeplerClient {
     return response.json();
   }
 
+  async listOfficialBlueprints(): Promise<unknown> {
+    const response = await this.request("/catalog/blueprints", {
+      method: "GET",
+    });
+
+    return response.json();
+  }
+
+  async getOfficialBlueprint(blueprintId: string): Promise<unknown> {
+    const response = await this.request(`/catalog/blueprints/${encodeURIComponent(blueprintId)}`, {
+      method: "GET",
+    });
+
+    return response.json();
+  }
+
+  async listOfficialResources(): Promise<unknown> {
+    const response = await this.request("/catalog/resources", {
+      method: "GET",
+    });
+
+    return response.json();
+  }
+
   async unregisterHabitat(habitatId: string): Promise<void> {
     await this.request(`/habitats/${encodeURIComponent(habitatId)}`, {
       method: "DELETE",

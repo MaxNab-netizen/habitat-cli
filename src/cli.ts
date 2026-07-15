@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Command } from "commander";
+import { readOfficialBlueprint, readOfficialBlueprintCatalog } from "./blueprints.js";
 import { loadKeplerConfig } from "./config.js";
 import { KeplerApiError, KeplerClient } from "./kepler-client.js";
 import { HabitatModule, HabitatModuleState, createModule, deleteModule, readModules, setModuleStatus, updateModule, writeModules } from "./modules.js";
+import { filterMaterialResources, readOfficialResourceCatalog } from "./resources.js";
 import { applyLocalTicks } from "./simulation.js";
 import {
   deleteRegistrationState,
@@ -54,6 +56,27 @@ export function createProgram(): Command {
         console.log(`Unmet energy: ${formatEnergy(result.unmetEnergyKwh)} kWh`);
       }
     });
+
+  const blueprints = program.command("blueprint").description("Inspect official Kepler blueprints.");
+  blueprints.command("list").description("List official Kepler blueprints.").action(async () => {
+    const catalog = await readOfficialBlueprintCatalog(createClient());
+    for (const blueprint of catalog.blueprints) {
+      console.log(`${blueprint.blueprintId}  ${blueprint.displayName}`);
+    }
+  });
+  blueprints.command("show <blueprint-id>").description("Show one official Kepler blueprint.").action(async (blueprintId: string) => {
+    console.log(JSON.stringify(await readOfficialBlueprint(createClient(), blueprintId), null, 2));
+  });
+
+  const resources = program.command("resource").description("Inspect official Kepler resource types.");
+  resources.command("list").description("List official Kepler resource types.").action(async () => {
+    const catalog = await readOfficialResourceCatalog(createClient());
+    console.log(`Catalog version: ${catalog.catalogVersion}`);
+    console.log("Resource type  Name  Kind  Unit");
+    for (const resource of filterMaterialResources(catalog.resources)) {
+      console.log(`${resource.resourceType}  ${resource.displayName}  ${resource.kind}  ${resource.unit ?? "-"}`);
+    }
+  });
 
   const modules = program.command("module").description("Manage local Habitat modules.");
   modules.command("list").description("List local Habitat modules.").action(async () => {
@@ -132,6 +155,9 @@ export function createProgram(): Command {
 Examples:
   habitat register --name "Artemis Ridge"
   habitat status
+  habitat blueprint list
+  habitat blueprint show basic-battery
+  habitat resource list
   habitat tick 10
   habitat unregister
 `,
