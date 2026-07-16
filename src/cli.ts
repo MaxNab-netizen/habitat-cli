@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import { readOfficialBlueprint, readOfficialBlueprintCatalog } from "./blueprints.js";
+import { createBuildPlan, formatBuildPlan, startBuild } from "./builds.js";
 import { loadKeplerConfig } from "./config.js";
+import { advanceConstruction, cancelConstruction, clearConstructionJobs, readConstructionJobs } from "./construction.js";
+import { addToSupplyCache, readSupplyCacheInventory } from "./inventory.js";
 import { KeplerApiError, KeplerClient } from "./kepler-client.js";
 import { HabitatModule, HabitatModuleState, createModule, deleteModule, readModules, setModuleStatus, updateModule, writeModules } from "./modules.js";
 import { filterMaterialResources, readOfficialResourceCatalog } from "./resources.js";
@@ -29,6 +32,35 @@ export function createProgram(): Command {
       await registerHabitat(options.name);
     });
 
+  const build = program
+    .command("build [blueprint-id]")
+    .description("Build a module, or show local construction status.")
+    .option("--dry-run", "Validate the build without changing local state")
+    .action(async (blueprintId: string | undefined, options: { dryRun?: boolean }) => {
+      if (blueprintId === "status") {
+        await showBuildStatus();
+        return;
+      }
+      if (!blueprintId) {
+        throw new Error("Specify a blueprint ID, or use: habitat build status");
+      }
+
+      const plan = await createBuildPlan(await readOfficialBlueprint(createClient(), blueprintId));
+      console.log(formatBuildPlan(plan, options.dryRun === true).join("\n"));
+      if (options.dryRun || plan.missingRequirements.length > 0) return;
+
+      const job = await startBuild(plan);
+      console.log(`Started ${job.displayName}; it will complete in ${job.remainingTicks} ticks.`);
+    });
+  build.command("status").description("Show pending local construction jobs.").action(async () => {
+    await showBuildStatus();
+  });
+  build.command("cancel <reference>").description("Cancel a pending construction job.").action(async (reference: string) => {
+    const result = await cancelConstruction(reference);
+    console.log(`Cancelled ${result.job.displayName}.`);
+    console.log(result.materialsReturned ? "Reserved materials returned to the supply cache." : "No reserved material record was available to return.");
+  });
+
   program
     .command("status")
     .description("Show whether this habitat is registered.")
@@ -55,6 +87,10 @@ export function createProgram(): Command {
       if (result.unmetEnergyKwh > 0) {
         console.log(`Unmet energy: ${formatEnergy(result.unmetEnergyKwh)} kWh`);
       }
+      const completed = await advanceConstruction(result.appliedTicks);
+      for (const job of completed) {
+        console.log(`Construction complete: ${job.displayName}.`);
+      }
     });
 
   const blueprints = program.command("blueprint").description("Inspect official Kepler blueprints.");
@@ -77,6 +113,31 @@ export function createProgram(): Command {
       console.log(`${resource.resourceType}  ${resource.displayName}  ${resource.kind}  ${resource.unit ?? "-"}`);
     }
   });
+
+  const inventory = program.command("inventory").description("Inspect resources stored in the local supply cache.");
+  inventory.command("list").description("List resources and quantities in the supply cache.").action(async () => {
+    const items = await readSupplyCacheInventory();
+    if (items.length === 0) {
+      console.log("The supply cache is empty.");
+      return;
+    }
+
+    const resourceWidth = Math.max("Resource".length, ...items.map((item) => item.resourceName.length));
+    const amountWidth = Math.max("Amount".length, ...items.map((item) => formatInventoryAmount(item.amount).length));
+    console.log(`${"Resource".padEnd(resourceWidth)}  ${"Amount".padStart(amountWidth)}  Unit`);
+    console.log(`${"-".repeat(resourceWidth)}  ${"-".repeat(amountWidth)}  ----`);
+    for (const item of items) {
+      console.log(`${item.resourceName.padEnd(resourceWidth)}  ${formatInventoryAmount(item.amount).padStart(amountWidth)}  ${item.unit}`);
+    }
+  });
+  inventory
+    .command("add <resource-name> <amount>")
+    .description("Add a resource quantity to the supply cache.")
+    .option("--unit <unit>", "Unit for the resource amount", "kg")
+    .action(async (resourceName: string, amount: string, options: { unit: string }) => {
+      const item = await addToSupplyCache(resourceName, parseInventoryAmount(amount), options.unit);
+      console.log(`Supply cache now has ${formatInventoryAmount(item.amount)} ${item.unit} of ${item.resourceName}.`);
+    });
 
   const modules = program.command("module").description("Manage local Habitat modules.");
   modules.command("list").description("List local Habitat modules.").action(async () => {
@@ -158,6 +219,10 @@ Examples:
   habitat blueprint list
   habitat blueprint show basic-battery
   habitat resource list
+  habitat inventory list
+  habitat inventory add ferrite 55
+  habitat build basic-battery --dry-run
+  habitat build status
   habitat tick 10
   habitat unregister
 `,
@@ -181,6 +246,31 @@ function parseTickCount(value: string): number {
 
 function formatEnergy(value: number): string {
   return value.toFixed(6);
+}
+
+function formatInventoryAmount(value: number): string {
+  return String(value);
+}
+
+function parseInventoryAmount(value: string): number {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Amount must be greater than zero.");
+  }
+  return amount;
+}
+
+async function showBuildStatus(): Promise<void> {
+  const jobs = await readConstructionJobs();
+  if (jobs.length === 0) {
+    console.log("No construction is in progress.");
+    return;
+  }
+
+  console.log("Construction in progress:");
+  for (const job of jobs) {
+    console.log(`${job.id}  ${job.displayName}: ${job.remainingTicks} of ${job.totalTicks} ticks remaining`);
+  }
 }
 
 function findModuleByReference(modules: HabitatModule[], reference: string): HabitatModule | undefined {
@@ -368,6 +458,7 @@ async function unregisterHabitat(): Promise<void> {
   }
 
   await deleteRegistrationState();
+  await clearConstructionJobs();
   await writeModules([]);
   console.log("Unregistered this habitat from Kepler.");
 }
