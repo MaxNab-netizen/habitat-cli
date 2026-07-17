@@ -84,6 +84,9 @@ export function createProgram(): Command {
       console.log(`Current tick: ${result.currentTick}`);
       console.log(`Energy drained: ${formatEnergy(result.energyDrainedKwh)} kWh`);
       console.log(`Battery remaining: ${formatEnergy(result.batteryRemainingKwh)} kWh`);
+      console.log(`Solar irradiance: ${result.solarIrradianceWPerM2} W/m² (${result.solarCondition})`);
+      console.log(`Solar energy generated: ${formatEnergy(result.solarEnergyGeneratedKwh)} kWh`);
+      if (result.solarChargingReason) console.log(`Solar charging: ${result.solarChargingReason}`);
       if (result.unmetEnergyKwh > 0) {
         console.log(`Unmet energy: ${formatEnergy(result.unmetEnergyKwh)} kWh`);
       }
@@ -112,6 +115,23 @@ export function createProgram(): Command {
     for (const resource of filterMaterialResources(catalog.resources)) {
       console.log(`${resource.resourceType}  ${resource.displayName}  ${resource.kind}  ${resource.unit ?? "-"}`);
     }
+  });
+
+  const world = program.command("world").description("Inspect the current Kepler world state.");
+  world
+    .command("solar-irradiance")
+    .description("Query the current solar irradiance from Kepler.")
+    .action(async () => {
+      const reading = await createClient().getSolarIrradiance();
+      console.log(`Solar irradiance: ${reading.wPerM2} W/m²`);
+      console.log(`Condition: ${reading.condition}`);
+    });
+
+  const solar = program.command("solar").description("Inspect solar power conditions.");
+  solar.command("status").description("Show current Kepler solar irradiance.").action(async () => {
+    const reading = await createClient().getSolarIrradiance();
+    console.log(`Solar irradiance: ${reading.wPerM2} W/m²`);
+    console.log(`Condition: ${reading.condition}`);
   });
 
   const inventory = program.command("inventory").description("Inspect resources stored in the local supply cache.");
@@ -219,6 +239,7 @@ Examples:
   habitat blueprint list
   habitat blueprint show basic-battery
   habitat resource list
+  habitat solar status
   habitat inventory list
   habitat inventory add ferrite 55
   habitat build basic-battery --dry-run

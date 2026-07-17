@@ -3,6 +3,11 @@ export interface HabitatRegistrationInput {
   habitatUuid: string;
 }
 
+export interface SolarIrradianceReading {
+  wPerM2: number;
+  condition: string;
+}
+
 export class KeplerApiError extends Error {
   constructor(
     public readonly status: number,
@@ -60,6 +65,27 @@ export class KeplerClient {
     return response.json();
   }
 
+  async getSolarIrradiance(): Promise<SolarIrradianceReading> {
+    const response = await this.request("/world/solar-irradiance", {
+      method: "GET",
+    });
+
+    const body = await response.json() as unknown;
+    if (!isRecord(body) || !isRecord(body.solarIrradiance)) {
+      throw new Error("Kepler returned an invalid solar irradiance response.");
+    }
+
+    const reading = body.solarIrradiance;
+    if (typeof reading.wPerM2 !== "number" || !Number.isFinite(reading.wPerM2) || reading.wPerM2 < 0 || typeof reading.condition !== "string" || !reading.condition.trim()) {
+      throw new Error("Kepler returned an invalid solar irradiance reading.");
+    }
+
+    return {
+      wPerM2: reading.wPerM2,
+      condition: reading.condition,
+    };
+  }
+
   async unregisterHabitat(habitatId: string): Promise<void> {
     await this.request(`/habitats/${encodeURIComponent(habitatId)}`, {
       method: "DELETE",
@@ -108,4 +134,8 @@ async function readErrorMessage(response: Response): Promise<string> {
 function readString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
